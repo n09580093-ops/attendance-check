@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>بوابة استعلام الطلاب — العلوم العسكرية</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Cairo', sans-serif; }
+</style>
+</head>
+<body class="min-h-screen bg-stone-100" dir="rtl">
+
+  <header class="border-b-4 border-amber-700 bg-stone-900 py-5 text-stone-100">
+    <div class="mx-auto max-w-md px-5">
+      <h1 class="text-lg font-extrabold">بوابة استعلام الطلاب</h1>
+      <p class="text-xs text-stone-300">مديرية التربية والتعليم والثقافة العسكرية - دائرة التعليم الجامعي</p>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-md px-5 py-8">
+    <div class="rounded-xl border border-stone-200 bg-white p-5 shadow-sm">
+      <p class="mb-4 text-sm leading-relaxed text-stone-600">
+        اختر جامعتك وشعبتك، ثم أدخل رقمك الجامعي للاستعلام عن حالتك بمادة العلوم العسكرية. لن يظهر لك أي بيانات
+        تخص طلابًا آخرين.
+      </p>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">اسم الجامعة / الكلية</label>
+      <select id="universitySelect" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50">
+        <option value="">— اختر الجامعة/الكلية —</option>
+      </select>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">رقم الشعبة</label>
+      <select id="sectionSelect" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50">
+        <option value="">— اختر الشعبة —</option>
+      </select>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">الرقم الجامعي</label>
+      <input id="idInput" type="text" placeholder="مثال: 20231234" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50" />
+
+      <button id="searchBtn" disabled
+        class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-800 disabled:opacity-50">
+        استعلام
+      </button>
+
+      <div id="statusLine" class="mt-3 text-center text-xs text-stone-400">جارٍ تحميل أحدث بيانات الحضور…</div>
+      <div id="result" class="mt-5"></div>
+    </div>
+
+    <p class="mt-4 text-center text-xs text-stone-400">
+      تُحدَّث هذه البيانات دوريًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
+    </p>
+  </main>
+
+<script>
+const STATUS_META = {
+  "منتظم":  { bg: "#f0fdfa", text: "#0f766e", ring: "#0f766e55" },
+  "إنذار":  { bg: "#fffbeb", text: "#b45309", ring: "#b4530955" },
+  "محروم":  { bg: "#fff1f2", text: "#9f1239", ring: "#9f123955" },
+};
+
+let ALL_ROWS = [];
+const statusLine = document.getElementById("statusLine");
+const resultEl = document.getElementById("result");
+const idInput = document.getElementById("idInput");
+const searchBtn = document.getElementById("searchBtn");
+const universitySelect = document.getElementById("universitySelect");
+const sectionSelect = document.getElementById("sectionSelect");
+
+function normId(v) {
+  return (v ?? "").toString().trim().replace(/\s+/g, "").toUpperCase();
+}
+
+function updateSearchEnabled() {
+  searchBtn.disabled = !(universitySelect.value && sectionSelect.value && idInput.value.trim());
+}
+
+function fillUniversities() {
+  const universities = [...new Set(ALL_ROWS.map((r) => r["الجامعة"]).filter(Boolean))].sort();
+  universitySelect.innerHTML = '<option value="">— اختر الجامعة/الكلية —</option>' +
+    universities.map((u) => `<option value="${u}">${u}</option>`).join("");
+  universitySelect.disabled = universities.length === 0;
+  idInput.disabled = universities.length === 0;
+}
+
+function fillSections() {
+  const uni = universitySelect.value;
+  const sections = uni
+    ? [...new Set(ALL_ROWS.filter((r) => r["الجامعة"] === uni).map((r) => r["الشعبة"]).filter(Boolean))].sort()
+    : [];
+  sectionSelect.innerHTML = '<option value="">— اختر الشعبة —</option>' +
+    sections.map((s) => `<option value="${s}">${s}</option>`).join("");
+  sectionSelect.disabled = !uni;
+  resultEl.innerHTML = "";
+}
+
+universitySelect.addEventListener("change", () => { fillSections(); updateSearchEnabled(); });
+sectionSelect.addEventListener("change", updateSearchEnabled);
+idInput.addEventListener("input", updateSearchEnabled);
+
+async function loadData() {
+  statusLine.textContent = "جارٍ تحميل أحدث بيانات الحضور…";
+  try {
+    // Cache-bust so students always see the latest uploaded student-data.json
+    const res = await fetch("./student-data.json?t=" + Date.now());
+    if (!res.ok) throw new Error("تعذّر الوصول لملف البيانات");
+    const payload = await res.json();
+    ALL_ROWS = payload.rows || [];
+    fillUniversities();
+    const publishedNote = payload.publishedAt ? " — آخر تحديث: " + new Date(payload.publishedAt).toLocaleString("ar") : "";
+    statusLine.textContent = "البيانات محدَّثة (" + ALL_ROWS.length + " سجلًا)" + publishedNote;
+  } catch (e) {
+    statusLine.innerHTML = 'لا توجد بيانات منشورة بعد من الدائرة. <button onclick="loadData()" class="underline">إعادة المحاولة</button>';
+    ALL_ROWS = [];
+  }
+}
+
+function renderResult(rows) {
+  if (!rows || rows.length === 0) {
+    resultEl.innerHTML =
+      '<div class="rounded-lg border border-stone-200 bg-stone-50 p-4 text-center text-sm text-stone-500">' +
+      "لا يوجد رقم جامعي مطابق ضمن الجامعة والشعبة المحدَّدتين. تأكد من اختيار الجامعة والشعبة الصحيحتين وكتابة الرقم بشكل صحيح، أو راجع شعبتك." +
+      "</div>";
+    return;
+  }
+  resultEl.innerHTML = rows.map((row) => {
+    const status = row["الحالة"] || "—";
+    const meta = STATUS_META[status] || { bg: "#f5f5f4", text: "#44403c", ring: "#44403c33" };
+    return (
+      '<div class="mb-3 rounded-xl border p-4" style="border-color:' + meta.ring + '">' +
+        '<div class="mb-2 flex items-center justify-between">' +
+          '<span class="text-sm font-semibold text-stone-700">' + (row["الجامعة"] || "") + " — " + (row["الشعبة"] || "") + "</span>" +
+          '<span class="rounded-full px-3 py-1 text-xs font-bold" style="background:' + meta.bg + ";color:" + meta.text + '">' + status + "</span>" +
+        "</div>" +
+        '<div class="grid grid-cols-3 gap-2 text-center text-sm">' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["حضور"] ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات حضور</div></div>' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["غياب"] ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات غياب</div></div>' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["نسبة الغياب %"] ?? "—") + '%</div><div class="text-[11px] text-stone-500">نسبة الغياب</div></div>' +
+        "</div>" +
+      "</div>"
+    );
+  }).join("");
+}
+
+function doSearch() {
+  const uni = universitySelect.value;
+  const sec = sectionSelect.value;
+  const id = normId(idInput.value);
+  if (!uni || !sec || !id) return;
+  const matches = ALL_ROWS.filter(
+    (r) => r["الجامعة"] === uni && r["الشعبة"] === sec && normId(r["الرقم الجامعي"]) === id
+  );
+  renderResult(matches);
+}
+
+searchBtn.addEventListener("click", doSearch);
+idInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !searchBtn.disabled) doSearch(); });
+
+loadData();
+</script>
+</body>
+</html>
