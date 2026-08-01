@@ -52,24 +52,28 @@
 
       <button id="searchBtn" disabled
         class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-800 disabled:opacity-50">
-        استعلام
+        <span id="searchBtnLabel">استعلام</span>
       </button>
 
-      <div id="statusLine" class="mt-3 text-center text-xs text-stone-400">جارٍ تحميل أحدث بيانات الحضور…</div>
+      <div id="statusLine" class="mt-3 text-center text-xs text-stone-400">جارٍ تحميل قائمة الجامعات…</div>
       <div id="result" class="mt-5"></div>
     </div>
 
     <p class="mt-4 text-center text-xs text-stone-400">
-      تُحدَّث هذه البيانات تلقائيًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
+      تُحدَّث هذه البيانات لحظيًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
     </p>
   </main>
 
 <script>
-/* ---------------- shared database (Supabase) — same "app_data" table used
-   by the attendance platform, the directorate control panel, and the
-   management viewer. This portal reads the single shared key
-   "directorate-sync:data" and flattens it into per-student rows so a
-   student can look up their own status by university + section + ID. ---- */
+/* ---------------- shared database (Supabase) — same project used by the
+   attendance platform, the directorate control panel, and the management
+   viewer. This portal ONLY talks to the lightweight "roster_index" view
+   (university/section names, no student data — used to fill the two
+   dropdowns) and the indexed "students" table with a fully filtered query
+   per lookup (returns a single row, not the whole roster). This is what
+   lets thousands of students use the portal at the same time without
+   exhausting the project's monthly data-transfer allowance — each lookup
+   transfers under 1KB regardless of how many students exist in total. --- */
 const SUPABASE_URL = "https://szlvqiuxnuoreoukkrzb.supabase.co";
 const SUPABASE_KEY = "sb_publishable_las_Qg3ApOgeY5vsgthyJg_eLTrqSws";
 
@@ -80,11 +84,12 @@ const STATUS_META = {
 };
 const STATUS_LABEL = { OK: "منتظم", WARN: "إنذار", DEPRIVE: "محروم" };
 
-let ALL_ROWS = [];
+let ROSTER_INDEX = []; // [{university, section}, ...] — small, just for the dropdowns
 const statusLine = document.getElementById("statusLine");
 const resultEl = document.getElementById("result");
 const idInput = document.getElementById("idInput");
 const searchBtn = document.getElementById("searchBtn");
+const searchBtnLabel = document.getElementById("searchBtnLabel");
 const universitySelect = document.getElementById("universitySelect");
 const sectionSelect = document.getElementById("sectionSelect");
 
@@ -97,80 +102,43 @@ function updateSearchEnabled() {
 }
 
 function fillUniversities() {
-  const universities = [...new Set(ALL_ROWS.map((r) => r["الجامعة"]).filter(Boolean))].sort();
-  const prevValue = universitySelect.value;
+  const universities = [...new Set(ROSTER_INDEX.map((r) => r.university))].sort();
   universitySelect.innerHTML = '<option value="">— اختر الجامعة/الكلية —</option>' +
     universities.map((u) => `<option value="${u}">${u}</option>`).join("");
   universitySelect.disabled = universities.length === 0;
   idInput.disabled = universities.length === 0;
-  if (universities.includes(prevValue)) universitySelect.value = prevValue;
 }
 
 function fillSections() {
   const uni = universitySelect.value;
-  const prevValue = sectionSelect.value;
   const sections = uni
-    ? [...new Set(ALL_ROWS.filter((r) => r["الجامعة"] === uni).map((r) => r["الشعبة"]).filter(Boolean))].sort()
+    ? [...new Set(ROSTER_INDEX.filter((r) => r.university === uni).map((r) => r.section))].sort()
     : [];
   sectionSelect.innerHTML = '<option value="">— اختر الشعبة —</option>' +
     sections.map((s) => `<option value="${s}">${s}</option>`).join("");
   sectionSelect.disabled = !uni;
-  if (sections.includes(prevValue)) sectionSelect.value = prevValue;
+  resultEl.innerHTML = "";
 }
 
 universitySelect.addEventListener("change", () => { fillSections(); updateSearchEnabled(); });
 sectionSelect.addEventListener("change", updateSearchEnabled);
 idInput.addEventListener("input", updateSearchEnabled);
 
-/* Flattens the combined regions/universities/sections snapshot published by
-   the attendance platform into flat per-student rows, in the exact shape
-   this page already works with (same field names as the old static
-   student-data.json, so the rest of the page needed no other changes). */
-function flattenSyncData(syncData) {
-  const rows = [];
-  if (!syncData || !syncData.regions) return rows;
-  for (const regionKey of Object.keys(syncData.regions)) {
-    const region = syncData.regions[regionKey];
-    const groups = [
-      ...(region.universities || []),
-      ...(region.exceptionUniversities || []),
-    ];
-    for (const uni of groups) {
-      for (const sec of uni.sections || []) {
-        for (const st of sec.students || []) {
-          rows.push({
-            "الجامعة": uni.name,
-            "الشعبة": sec.name,
-            "الرقم الجامعي": st.id,
-            "الحالة": STATUS_LABEL[st.status] || st.status || "—",
-            "حضور": st.presentCount,
-            "غياب": st.absentCount,
-            "نسبة الغياب %": st.absencePct,
-          });
-        }
-      }
-    }
-  }
-  return rows;
-}
-
-async function loadData() {
+/* Loads ONLY the small distinct university/section list — never the
+   student roster itself. */
+async function loadRosterIndex() {
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_data?key=eq.directorate-sync:data&select=value`,
-      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-    );
-    if (!res.ok) throw new Error("تعذّر الوصول لقاعدة البيانات");
-    const dbRows = await res.json();
-    if (!dbRows.length) { ALL_ROWS = []; fillUniversities(); statusLine.textContent = "لا توجد بيانات منشورة بعد من الدائرة."; return; }
-    const payload = dbRows[0].value;
-    ALL_ROWS = flattenSyncData(payload);
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/roster_index?select=university,section`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    if (!res.ok) throw new Error("تعذّر تحميل قائمة الجامعات");
+    ROSTER_INDEX = await res.json();
     fillUniversities();
-    const publishedNote = payload.publishedAt ? " — آخر تحديث: " + new Date(payload.publishedAt).toLocaleString("ar") : "";
-    statusLine.textContent = "البيانات محدَّثة (" + ALL_ROWS.length + " سجلًا)" + publishedNote;
+    statusLine.textContent = ROSTER_INDEX.length
+      ? "اختر جامعتك وشعبتك ثم أدخل رقمك الجامعي"
+      : "لا توجد بيانات منشورة بعد من الدائرة.";
   } catch (e) {
-    statusLine.innerHTML = 'تعذّر تحميل البيانات حاليًا. <button onclick="loadData()" class="underline">إعادة المحاولة</button>';
-    ALL_ROWS = [];
+    statusLine.innerHTML = 'تعذّر تحميل قائمة الجامعات. <button onclick="loadRosterIndex()" class="underline">إعادة المحاولة</button>';
   }
 }
 
@@ -183,42 +151,53 @@ function renderResult(rows) {
     return;
   }
   resultEl.innerHTML = rows.map((row) => {
-    const status = row["الحالة"] || "—";
+    const status = STATUS_LABEL[row.status] || row.status || "—";
     const meta = STATUS_META[status] || { bg: "#f5f5f4", text: "#44403c", ring: "#44403c33" };
     return (
       '<div class="mb-3 rounded-xl border p-4" style="border-color:' + meta.ring + '">' +
         '<div class="mb-2 flex items-center justify-between">' +
-          '<span class="text-sm font-semibold text-stone-700">' + (row["الجامعة"] || "") + " — " + (row["الشعبة"] || "") + "</span>" +
+          '<span class="text-sm font-semibold text-stone-700">' + (row.university || "") + " — " + (row.section || "") + "</span>" +
           '<span class="rounded-full px-3 py-1 text-xs font-bold" style="background:' + meta.bg + ";color:" + meta.text + '">' + status + "</span>" +
         "</div>" +
         '<div class="grid grid-cols-3 gap-2 text-center text-sm">' +
-          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["حضور"] ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات حضور</div></div>' +
-          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["غياب"] ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات غياب</div></div>' +
-          '<div><div class="text-lg font-extrabold text-stone-800">' + (row["نسبة الغياب %"] ?? "—") + '%</div><div class="text-[11px] text-stone-500">نسبة الغياب</div></div>' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row.present_count ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات حضور</div></div>' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row.absent_count ?? "—") + '</div><div class="text-[11px] text-stone-500">محاضرات غياب</div></div>' +
+          '<div><div class="text-lg font-extrabold text-stone-800">' + (row.absence_pct ?? "—") + '%</div><div class="text-[11px] text-stone-500">نسبة الغياب</div></div>' +
         "</div>" +
       "</div>"
     );
   }).join("") + '<p class="mt-2 text-center text-xs text-stone-400">هذه بياناتك حتى آخر تحديث من جامعتك.</p>';
 }
 
-function doSearch() {
+async function doSearch() {
   const uni = universitySelect.value;
   const sec = sectionSelect.value;
   const id = normId(idInput.value);
   if (!uni || !sec || !id) return;
-  const matches = ALL_ROWS.filter(
-    (r) => r["الجامعة"] === uni && r["الشعبة"] === sec && normId(r["الرقم الجامعي"]) === id
-  );
-  renderResult(matches);
+  searchBtn.disabled = true;
+  searchBtnLabel.textContent = "جارٍ البحث…";
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/students`
+      + `?university=eq.${encodeURIComponent(uni)}`
+      + `&section=eq.${encodeURIComponent(sec)}`
+      + `&student_id=eq.${encodeURIComponent(id)}`
+      + `&select=university,section,student_id,status,present_count,absent_count,absence_pct`;
+    const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+    const rows = res.ok ? await res.json() : [];
+    renderResult(rows);
+  } catch (e) {
+    resultEl.innerHTML = '<div class="rounded-lg border border-rose-200 bg-rose-50 p-4 text-center text-sm text-rose-700">تعذّر إتمام الاستعلام، حاول مرة أخرى.</div>';
+  } finally {
+    searchBtn.disabled = false;
+    searchBtnLabel.textContent = "استعلام";
+    updateSearchEnabled();
+  }
 }
 
 searchBtn.addEventListener("click", doSearch);
 idInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !searchBtn.disabled) doSearch(); });
 
-loadData();
-// Keep the roster reasonably fresh in the background without the student
-// needing to reload the page.
-setInterval(loadData, 60000);
+loadRosterIndex();
 </script>
 </body>
 </html>
