@@ -29,9 +29,8 @@
       <div class="mb-4 flex items-start gap-2 rounded-lg border border-teal-200 bg-teal-50 p-3 text-xs leading-relaxed text-teal-800">
         <span class="mt-0.5">ℹ️</span>
         <span>
-          تُحدَّث بيانات الحضور والغياب <span class="font-semibold">أسبوعيًا</span> من قبل الدائرة. إن استعلمت
-          اليوم ثم عدت بعد أسبوع تقريبًا وأدخلت نفس رقمك مجددًا، سيظهر لك عدد غياباتك المحدَّث وحالتك (منتظم/إنذار/محروم)
-          حتى تلك اللحظة — يمكنك العودة لهذه الصفحة والاستعلام في أي وقت لمتابعة وضعك أولًا بأول.
+          بيانات الحضور والغياب <span class="font-semibold">محدَّثة لحظيًا</span> من منصة الرقابة الإلكترونية لدائرة
+          التعليم الجامعي. عدد غياباتك وحالتك (منتظم/إنذار/محروم) يعكسان آخر كشف حضور رفعته جامعتك.
         </span>
       </div>
 
@@ -61,16 +60,25 @@
     </div>
 
     <p class="mt-4 text-center text-xs text-stone-400">
-      تُحدَّث هذه البيانات دوريًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
+      تُحدَّث هذه البيانات تلقائيًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
     </p>
   </main>
 
 <script>
+/* ---------------- shared database (Supabase) — same "app_data" table used
+   by the attendance platform, the directorate control panel, and the
+   management viewer. This portal reads the single shared key
+   "directorate-sync:data" and flattens it into per-student rows so a
+   student can look up their own status by university + section + ID. ---- */
+const SUPABASE_URL = "https://szlvqiuxnuoreoukkrzb.supabase.co";
+const SUPABASE_KEY = "sb_publishable_las_Qg3ApOgeY5vsgthyJg_eLTrqSws";
+
 const STATUS_META = {
   "منتظم":  { bg: "#f0fdfa", text: "#0f766e", ring: "#0f766e55" },
   "إنذار":  { bg: "#fffbeb", text: "#b45309", ring: "#b4530955" },
   "محروم":  { bg: "#fff1f2", text: "#9f1239", ring: "#9f123955" },
 };
+const STATUS_LABEL = { OK: "منتظم", WARN: "إنذار", DEPRIVE: "محروم" };
 
 let ALL_ROWS = [];
 const statusLine = document.getElementById("statusLine");
@@ -90,40 +98,78 @@ function updateSearchEnabled() {
 
 function fillUniversities() {
   const universities = [...new Set(ALL_ROWS.map((r) => r["الجامعة"]).filter(Boolean))].sort();
+  const prevValue = universitySelect.value;
   universitySelect.innerHTML = '<option value="">— اختر الجامعة/الكلية —</option>' +
     universities.map((u) => `<option value="${u}">${u}</option>`).join("");
   universitySelect.disabled = universities.length === 0;
   idInput.disabled = universities.length === 0;
+  if (universities.includes(prevValue)) universitySelect.value = prevValue;
 }
 
 function fillSections() {
   const uni = universitySelect.value;
+  const prevValue = sectionSelect.value;
   const sections = uni
     ? [...new Set(ALL_ROWS.filter((r) => r["الجامعة"] === uni).map((r) => r["الشعبة"]).filter(Boolean))].sort()
     : [];
   sectionSelect.innerHTML = '<option value="">— اختر الشعبة —</option>' +
     sections.map((s) => `<option value="${s}">${s}</option>`).join("");
   sectionSelect.disabled = !uni;
-  resultEl.innerHTML = "";
+  if (sections.includes(prevValue)) sectionSelect.value = prevValue;
 }
 
 universitySelect.addEventListener("change", () => { fillSections(); updateSearchEnabled(); });
 sectionSelect.addEventListener("change", updateSearchEnabled);
 idInput.addEventListener("input", updateSearchEnabled);
 
+/* Flattens the combined regions/universities/sections snapshot published by
+   the attendance platform into flat per-student rows, in the exact shape
+   this page already works with (same field names as the old static
+   student-data.json, so the rest of the page needed no other changes). */
+function flattenSyncData(syncData) {
+  const rows = [];
+  if (!syncData || !syncData.regions) return rows;
+  for (const regionKey of Object.keys(syncData.regions)) {
+    const region = syncData.regions[regionKey];
+    const groups = [
+      ...(region.universities || []),
+      ...(region.exceptionUniversities || []),
+    ];
+    for (const uni of groups) {
+      for (const sec of uni.sections || []) {
+        for (const st of sec.students || []) {
+          rows.push({
+            "الجامعة": uni.name,
+            "الشعبة": sec.name,
+            "الرقم الجامعي": st.id,
+            "الحالة": STATUS_LABEL[st.status] || st.status || "—",
+            "حضور": st.presentCount,
+            "غياب": st.absentCount,
+            "نسبة الغياب %": st.absencePct,
+          });
+        }
+      }
+    }
+  }
+  return rows;
+}
+
 async function loadData() {
-  statusLine.textContent = "جارٍ تحميل أحدث بيانات الحضور…";
   try {
-    // Cache-bust so students always see the latest uploaded student-data.json
-    const res = await fetch("./student-data.json?t=" + Date.now());
-    if (!res.ok) throw new Error("تعذّر الوصول لملف البيانات");
-    const payload = await res.json();
-    ALL_ROWS = payload.rows || [];
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/app_data?key=eq.directorate-sync:data&select=value`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) throw new Error("تعذّر الوصول لقاعدة البيانات");
+    const dbRows = await res.json();
+    if (!dbRows.length) { ALL_ROWS = []; fillUniversities(); statusLine.textContent = "لا توجد بيانات منشورة بعد من الدائرة."; return; }
+    const payload = dbRows[0].value;
+    ALL_ROWS = flattenSyncData(payload);
     fillUniversities();
     const publishedNote = payload.publishedAt ? " — آخر تحديث: " + new Date(payload.publishedAt).toLocaleString("ar") : "";
     statusLine.textContent = "البيانات محدَّثة (" + ALL_ROWS.length + " سجلًا)" + publishedNote;
   } catch (e) {
-    statusLine.innerHTML = 'لا توجد بيانات منشورة بعد من الدائرة. <button onclick="loadData()" class="underline">إعادة المحاولة</button>';
+    statusLine.innerHTML = 'تعذّر تحميل البيانات حاليًا. <button onclick="loadData()" class="underline">إعادة المحاولة</button>';
     ALL_ROWS = [];
   }
 }
@@ -152,7 +198,7 @@ function renderResult(rows) {
         "</div>" +
       "</div>"
     );
-  }).join("") + '<p class="mt-2 text-center text-xs text-stone-400">هذه بياناتك حتى آخر تحديث. البيانات تُحدَّث أسبوعيًا — عد للاستعلام لاحقًا لمتابعة أي تغيّر.</p>';
+  }).join("") + '<p class="mt-2 text-center text-xs text-stone-400">هذه بياناتك حتى آخر تحديث من جامعتك.</p>';
 }
 
 function doSearch() {
@@ -170,6 +216,9 @@ searchBtn.addEventListener("click", doSearch);
 idInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !searchBtn.disabled) doSearch(); });
 
 loadData();
+// Keep the roster reasonably fresh in the background without the student
+// needing to reload the page.
+setInterval(loadData, 60000);
 </script>
 </body>
 </html>
