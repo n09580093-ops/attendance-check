@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>بوابة استعلام الطلاب — العلوم العسكرية</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Cairo', sans-serif; }
+</style>
+</head>
+<body class="min-h-screen bg-stone-100" dir="rtl">
+
+  <header class="border-b-4 border-amber-700 bg-stone-900 py-5 text-stone-100">
+    <div class="mx-auto max-w-md px-5">
+      <h1 class="text-lg font-extrabold">بوابة استعلام الطلاب</h1>
+      <p class="text-xs text-stone-300">مديرية التربية والتعليم والثقافة العسكرية - دائرة التعليم الجامعي</p>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-md px-5 py-8">
+    <div class="rounded-xl border border-stone-200 bg-white p-5 shadow-sm">
+      <p class="mb-4 text-sm leading-relaxed text-stone-600">
+        اختر جامعتك وشعبتك، ثم أدخل رقمك الجامعي للاستعلام عن حالتك بمادة العلوم العسكرية. لن يظهر لك أي بيانات
+        تخص طلابًا آخرين.
+      </p>
+
+      <div class="mb-4 flex items-start gap-2 rounded-lg border border-teal-200 bg-teal-50 p-3 text-xs leading-relaxed text-teal-800">
+        <span class="mt-0.5">ℹ️</span>
+        <span>
+          بيانات الحضور والغياب <span class="font-semibold">محدَّثة لحظيًا</span> من منصة الرقابة الإلكترونية لدائرة
+          التعليم الجامعي. عدد غياباتك وحالتك (منتظم/إنذار/محروم) يعكسان آخر كشف حضور رفعته جامعتك.
+        </span>
+      </div>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">اسم الجامعة / الكلية</label>
+      <select id="universitySelect" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50">
+        <option value="">— اختر الجامعة/الكلية —</option>
+      </select>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">رقم الشعبة</label>
+      <select id="sectionSelect" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50">
+        <option value="">— اختر الشعبة —</option>
+      </select>
+
+      <label class="mb-1 block text-sm font-semibold text-stone-700">الرقم الجامعي</label>
+      <input id="idInput" type="text" placeholder="مثال: 20231234" disabled
+        class="mb-3 w-full rounded-lg border border-stone-300 px-3 py-2.5 text-base focus:border-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/20 disabled:opacity-50" />
+
+      <button id="searchBtn" disabled
+        class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-800 disabled:opacity-50">
+        <span id="searchBtnLabel">استعلام</span>
+      </button>
+
+      <div id="statusLine" class="mt-3 text-center text-xs text-stone-400">جارٍ تحميل قائمة الجامعات…</div>
+      <div id="result" class="mt-5"></div>
+    </div>
+
+    <p class="mt-4 text-center text-xs text-stone-400">
+      تُحدَّث هذه البيانات لحظيًا من قبل دائرة التعليم الجامعي. لأي استفسار أو اعتراض راجع شعبتك.
+    </p>
+  </main>
+
+<script>
+/* ---------------- shared database (Supabase) — same project used by the
+   attendance platform, the directorate control panel, and the management
+   viewer. This portal ONLY talks to the lightweight "roster_index" view
+   (university/section names, no student data — used to fill the two
+   dropdowns) and the indexed "students" table with a fully filtered query
+   per lookup (returns a single row, not the whole roster). This is what
+   lets thousands of students use the portal at the same time without
+   exhausting the project's monthly data-transfer allowance — each lookup
+   transfers under 1KB regardless of how many students exist in total. --- */
+const SUPABASE_URL = "https://szlvqiuxnuoreoukkrzb.supabase.co";
+const SUPABASE_KEY = "sb_publishable_las_Qg3ApOgeY5vsgthyJg_eLTrqSws";
+
+const STATUS_META = {
+  "منتظم":  { bg: "#f0fdfa", text: "#0f766e", ring: "#0f766e55" },
+  "إنذار":  { bg: "#fffbeb", text: "#b45309", ring: "#b4530955" },
+  "محروم":  { bg: "#fff1f2", text: "#9f1239", ring: "#9f123955" },
+};
+const STATUS_LABEL = { OK: "منتظم", WARN: "إنذار", DEPRIVE: "محروم" };
+
+let ROSTER_INDEX = []; // [{university, section}, ...] — small, just for the dropdowns
+const statusLine = document.getElementById("statusLine");
+const resultEl = document.getElementById("result");
+const idInput = document.getElementById("idInput");
+const searchBtn = document.getElementById("searchBtn");
+const searchBtnLabel = document.getElementById("searchBtnLabel");
+const universitySelect = document.getElementById("universitySelect");
+const sectionSelect = document.getElementById("sectionSelect");
+
+function normId(v) {
+  return (v ?? "").toString().trim().replace(/\s+/g, "").toUpperCase();
+}
+
+function updateSearchEnabled() {
+  searchBtn.disabled = !(universitySelect.value && sectionSelect.value && idInput.value.trim());
+}
+
+function fillUniversities() {
+  const universities = [...new Set(ROSTER_INDEX.map((r) => r.university))].sort();
+  universitySelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "— اختر الجامعة/الكلية —";
+  universitySelect.appendChild(placeholder);
+  for (const u of universities) {
+    const opt = document.createElement("option");
+    opt.value = u;
+    opt.textContent = u;
+    universitySelect.appendChild(opt);
+  }
+  universitySelect.disabled = universities.length === 0;
+  idInput.disabled = universities.length === 0;
+}
+
+function fillSections() {
+  const uni = universitySelect.value;
+  const sections = uni
+    ? [...new Set(ROSTER_INDEX.filter((r) => r.university === uni).map((r) => r.section))].sort()
+    : [];
+  sectionSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "— اختر الشعبة —";
+  sectionSelect.appendChild(placeholder);
+  for (const s of sections) {
+    const opt = document.createElement("option");
+    opt.value = s;
+    opt.textContent = s;
+    sectionSelect.appendChild(opt);
+  }
+  sectionSelect.disabled = !uni;
+  resultEl.innerHTML = "";
+}
+
+universitySelect.addEventListener("change", () => { fillSections(); updateSearchEnabled(); });
+sectionSelect.addEventListener("change", updateSearchEnabled);
+idInput.addEventListener("input", updateSearchEnabled);
+
+/* Loads ONLY the small distinct university/section list — never the
+   student roster itself. */
+async function loadRosterIndex() {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/roster_index?select=university,section`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    if (!res.ok) throw new Error("تعذّر تحميل قائمة الجامعات");
+    ROSTER_INDEX = await res.json();
+    fillUniversities();
+    statusLine.textContent = ROSTER_INDEX.length
+      ? "اختر جامعتك وشعبتك ثم أدخل رقمك الجامعي"
+      : "لا توجد بيانات منشورة بعد من الدائرة.";
+  } catch (e) {
+    statusLine.textContent = "";
+    const msg = document.createTextNode("تعذّر تحميل قائمة الجامعات. ");
+    const retryBtn = document.createElement("button");
+    retryBtn.className = "underline";
+    retryBtn.textContent = "إعادة المحاولة";
+    retryBtn.addEventListener("click", loadRosterIndex);
+    statusLine.appendChild(msg);
+    statusLine.appendChild(retryBtn);
+  }
+}
+
+function renderResult(rows) {
+  resultEl.innerHTML = "";
+  if (!rows || rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "rounded-lg border border-stone-200 bg-stone-50 p-4 text-center text-sm text-stone-500";
+    empty.textContent = "لا يوجد رقم جامعي مطابق ضمن الجامعة والشعبة المحدَّدتين. تأكد من اختيار الجامعة والشعبة الصحيحتين وكتابة الرقم بشكل صحيح، أو راجع شعبتك.";
+    resultEl.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const status = STATUS_LABEL[row.status] || row.status || "—";
+    const meta = STATUS_META[status] || { bg: "#f5f5f4", text: "#44403c", ring: "#44403c33" };
+
+    const card = document.createElement("div");
+    card.className = "mb-3 rounded-xl border p-4";
+    card.style.borderColor = meta.ring;
+
+    const headerRow = document.createElement("div");
+    headerRow.className = "mb-2 flex items-center justify-between";
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "text-sm font-semibold text-stone-700";
+    nameSpan.textContent = `${row.university || ""} — ${row.section || ""}`;
+    const statusSpan = document.createElement("span");
+    statusSpan.className = "rounded-full px-3 py-1 text-xs font-bold";
+    statusSpan.style.background = meta.bg;
+    statusSpan.style.color = meta.text;
+    statusSpan.textContent = status;
+    headerRow.appendChild(nameSpan);
+    headerRow.appendChild(statusSpan);
+
+    const statsGrid = document.createElement("div");
+    statsGrid.className = "grid grid-cols-3 gap-2 text-center text-sm";
+    const stats = [
+      [row.present_count ?? "—", "محاضرات حضور"],
+      [row.absent_count ?? "—", "محاضرات غياب"],
+      [`${row.absence_pct ?? "—"}%`, "نسبة الغياب"],
+    ];
+    for (const [value, label] of stats) {
+      const cell = document.createElement("div");
+      const valueDiv = document.createElement("div");
+      valueDiv.className = "text-lg font-extrabold text-stone-800";
+      valueDiv.textContent = value;
+      const labelDiv = document.createElement("div");
+      labelDiv.className = "text-[11px] text-stone-500";
+      labelDiv.textContent = label;
+      cell.appendChild(valueDiv);
+      cell.appendChild(labelDiv);
+      statsGrid.appendChild(cell);
+    }
+
+    card.appendChild(headerRow);
+    card.appendChild(statsGrid);
+    resultEl.appendChild(card);
+  }
+  const footer = document.createElement("p");
+  footer.className = "mt-2 text-center text-xs text-stone-400";
+  footer.textContent = "هذه بياناتك حتى آخر تحديث من جامعتك.";
+  resultEl.appendChild(footer);
+}
+
+async function doSearch() {
+  const uni = universitySelect.value;
+  const sec = sectionSelect.value;
+  const id = normId(idInput.value);
+  if (!uni || !sec || !id) return;
+  searchBtn.disabled = true;
+  searchBtnLabel.textContent = "جارٍ البحث…";
+  try {
+    // Calls the narrowly-scoped lookup_student_status() database function
+    // instead of querying the students table directly. The function only
+    // ever returns the single row matching an exact university+section+ID
+    // match — it cannot be used to enumerate other students, other
+    // sections, or other universities, unlike a direct table query.
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/lookup_student_status`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ p_university: uni, p_section: sec, p_student_id: id }),
+    });
+    const rows = res.ok ? await res.json() : [];
+    renderResult(rows);
+  } catch (e) {
+    resultEl.innerHTML = '<div class="rounded-lg border border-rose-200 bg-rose-50 p-4 text-center text-sm text-rose-700">تعذّر إتمام الاستعلام، حاول مرة أخرى.</div>';
+  } finally {
+    searchBtn.disabled = false;
+    searchBtnLabel.textContent = "استعلام";
+    updateSearchEnabled();
+  }
+}
+
+searchBtn.addEventListener("click", doSearch);
+idInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !searchBtn.disabled) doSearch(); });
+
+loadRosterIndex();
+</script>
+</body>
+</html>
